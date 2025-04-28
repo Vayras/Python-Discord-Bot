@@ -1,85 +1,179 @@
-import discord
-from discord.ext import commands
-import logging
-from dotenv import load_dotenv
+import certifi
 import os
 
+os.environ['SSL_CERT_FILE'] = certifi.where()
+
+import uuid
+from datetime import datetime, timedelta
+import asyncio
+import logging
+from aiohttp import web, ClientSession
+import discord
+from discord.ext import commands
+from dotenv import load_dotenv
+from pymongo import MongoClient
+
+# Load environment variables
+
 load_dotenv()
-token = os.getenv('DISCORD_TOKEN')
 
-handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
+# Discord & OAuth credentials
+BOT_TOKEN     = os.getenv("DISCORD_TOKEN")
+CLIENT_ID     = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+REDIRECT_URI  = os.getenv("REDIRECT_URI")  # e.g. http://localhost:8080/callback
+GUILD_ID      = os.getenv("GUILD_ID")
+INVITE_URL    = os.getenv("INVITE_URL")      # post-role-assign redirect
+MONGO_URI     = os.getenv("MONGO_URI")
+
+# Cohort → Discord role ID map
+ROLE_MAP = {
+    "lbtcl":     os.getenv("ROLE_LBTCL_ID"),
+    "bpd":       os.getenv("ROLE_BPD_ID"),
+    "mastering": os.getenv("ROLE_MASTER_ID"),
+    "programming": os.getenv("ROLE_PB_ID"),
+}
+
+# MongoDB setup
+MONGO_DB         = os.getenv("MONGO_DB")   # e.g. "Demon"
+MONGO_COLLECTION = os.getenv("MONGO_COLLECTION")  # e.g. "C1"
+if not MONGO_DB:
+    raise RuntimeError("Environment variable MONGO_DB must be set to your database name")
+if not MONGO_COLLECTION:
+    raise RuntimeError("Environment variable MONGO_COLLECTION must be set to your collection name")
+
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client[MONGO_DB]
+tokens_col = db[MONGO_COLLECTION]  # use your specified collection
+MONGO_DB      = os.getenv("MONGO_DB")  # e.g. "mydatabase"
+if not MONGO_DB:
+    raise RuntimeError("Environment variable MONGO_DB must be set to your database name")
+
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client[MONGO_DB]
+tokens_col = db.tokens  # will auto-create
+
+# Token management with MongoDB
+def create_token(role_key: str, valid_minutes: int = 60) -> str:
+    token = uuid.uuid4().hex
+    expires_at = datetime.utcnow() + timedelta(minutes=valid_minutes)
+    tokens_col.insert_one({
+        "token": token,
+        "role_key": role_key,
+        "expires_at": expires_at,
+        "used": False
+    })
+    return token
+
+
+def validate_and_mark(token: str) -> str | None:
+    # atomically find unused, unexpired token and mark it used
+    now = datetime.utcnow()
+    result = tokens_col.find_one_and_update(
+        {"token": token, "used": False, "expires_at": {"$gt": now}},
+        {"$set": {"used": True}},
+        return_document=True
+    )
+    if not result:
+        return None
+    return result["role_key"]
+
+# Discord bot setup
 intents = discord.Intents.default()
-intents.message_content = True
 intents.members = True
-
-bot = commands.Bot(command_prefix='!', intents=intents)
-
-secret_role = "Gamer"
+bot = commands.Bot(command_prefix="!", intents=intents)
+logging.basicConfig(level=logging.INFO)
 
 @bot.event
 async def on_ready():
-    print(f"We are ready to go in, {bot.user.name}")
+    print(f"Bot logged in as {bot.user} ({bot.user.id})")
 
-@bot.event
-async def on_member_join(member):
-    await member.send(f"Welcome to the server {member.name}")
+# HTTP server for invite & callback
+routes = web.RouteTableDef()
 
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
-        return
+# To generate the OAuth2 authorization URL for a given cohort, make a GET request to /invite/{cohort}
+# e.g. requesting GET http://localhost:8080/invite/lbtcl will redirect you to the constructed Discord OAuth URL
+@routes.get("/invite/{cohort}")
+async def invite(request):
+    cohort = request.match_info["cohort"]
+    if cohort not in ROLE_MAP:
+        return web.Response(text="Invalid cohort", status=400)
 
-    if "shit" in message.content.lower():
-        await message.delete()
-        await message.channel.send(f"{message.author.mention} - dont use that word!")
+    token = create_token(cohort)
+    params = {
+        "client_id":     CLIENT_ID,
+        "redirect_uri":  REDIRECT_URI,
+        "response_type": "code",
+        "scope":         "identify guilds.join",
+        "state":         token
+    }
+    import urllib.parse
+    oauth_url = "https://discord.com/oauth2/authorize?" + urllib.parse.urlencode(params)
+    raise web.HTTPFound(location=oauth_url)
 
-    await bot.process_commands(message)
+@routes.get("/callback")
+async def oauth_callback(request):
+    code  = request.query.get("code")
+    state = request.query.get("state")
+    role_key = validate_and_mark(state)
 
-@bot.command()
-async def hello(ctx):
-    await ctx.send(f"Hello {ctx.author.mention}!")
+    if not code or not role_key:
+        return web.Response(text="Invalid, expired, or already-used link", status=400)
 
-@bot.command()
-async def assign(ctx):
-    role = discord.utils.get(ctx.guild.roles, name=secret_role)
-    if role:
-        await ctx.author.add_roles(role)
-        await ctx.send(f"{ctx.author.mention} is now assigned to {secret_role}")
-    else:
-        await ctx.send("Role doesn't exist")
+    # Exchange code for access token
+    token_data = {
+        "client_id":     CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "grant_type":    "authorization_code",
+        "code":          code,
+        "redirect_uri":  REDIRECT_URI,
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    async with ClientSession() as session:
+        async with session.post("https://discord.com/api/oauth2/token", data=token_data, headers=headers) as resp:
+            token_json = await resp.json()
+    access_token = token_json.get("access_token")
+    if not access_token:
+        return web.Response(text="Token exchange failed", status=400)
 
-@bot.command()
-async def remove(ctx):
-    role = discord.utils.get(ctx.guild.roles, name=secret_role)
-    if role:
-        await ctx.author.remove_roles(role)
-        await ctx.send(f"{ctx.author.mention} has had the {secret_role} removed")
-    else:
-        await ctx.send("Role doesn't exist")
+    # Fetch user ID
+    async with ClientSession() as session:
+        async with session.get(
+            "https://discord.com/api/users/@me",
+            headers={"Authorization": f"Bearer {access_token}"}
+        ) as resp:
+            user_json = await resp.json()
+    user_id = user_json.get("id")
 
-@bot.command()
-async def dm(ctx, *, msg):
-    await ctx.author.send(f"You said {msg}")
+    # Add user to guild & assign role
+    bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+    async with ClientSession() as session:
+        await session.put(
+            f"https://discord.com/api/guilds/{GUILD_ID}/members/{user_id}",
+            json={"access_token": access_token},
+            headers=bot_headers
+        )
+        role_id = ROLE_MAP[role_key]
+        await session.put(
+            f"https://discord.com/api/guilds/{GUILD_ID}/members/{user_id}/roles/{role_id}",
+            headers=bot_headers
+        )
 
-@bot.command()
-async def reply(ctx):
-    await ctx.reply("This is a reply to your message!")
+    # Final redirect back into Discord
+    raise web.HTTPFound(location=INVITE_URL)
 
-@bot.command()
-async def poll(ctx, *, question):
-    embed = discord.Embed(title="New Poll", description=question)
-    poll_message = await ctx.send(embed=embed)
-    await poll_message.add_reaction("👍")
-    await poll_message.add_reaction("👎")
+# App setup
+app = web.Application()
+app.add_routes(routes)
 
-@bot.command()
-@commands.has_role(secret_role)
-async def secret(ctx):
-    await ctx.send("Welcome to the club!")
+async def main():
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print("OAuth server listening on http://0.0.0.0:8080")
+    await bot.start(BOT_TOKEN)
 
-@secret.error
-async def secret_error(ctx, error):
-    if isinstance(error, commands.MissingRole):
-        await ctx.send("You do not have permission to do that!")
-
-bot.run(token, log_handler=handler, log_level=logging.DEBUG)
+if __name__ == "__main__":
+    asyncio.run(main())
