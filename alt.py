@@ -56,11 +56,11 @@ tokens_col = db.tokens  # will auto-create
 # Token management with MongoDB
 def create_token(role_key: str, valid_minutes: int = 60) -> str:
     token = uuid.uuid4().hex
-    expires_at = datetime.utcnow() + timedelta(minutes=valid_minutes)
+    # expires_at = datetime.utcnow() + timedelta(minutes=valid_minutes)
     tokens_col.insert_one({
         "token": token,
         "role_key": role_key,
-        "expires_at": expires_at,
+        # "expires_at": expires_at,
         "used": False
     })
     return token

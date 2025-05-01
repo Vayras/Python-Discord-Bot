@@ -4,7 +4,6 @@ import os
 os.environ['SSL_CERT_FILE'] = certifi.where()
 
 import uuid
-from datetime import datetime, timedelta
 import asyncio
 import logging
 from aiohttp import web, ClientSession
@@ -14,7 +13,6 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 
 # Load environment variables
-
 load_dotenv()
 
 # Discord & OAuth credentials
@@ -23,60 +21,47 @@ CLIENT_ID     = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 REDIRECT_URI  = os.getenv("REDIRECT_URI")  # e.g. http://localhost:8080/callback
 GUILD_ID      = os.getenv("GUILD_ID")
-INVITE_URL    = os.getenv("INVITE_URL")      # post-role-assign redirect
+INVITE_URL    = os.getenv("INVITE_URL")    # post-role-assign redirect
 MONGO_URI     = os.getenv("MONGO_URI")
-
-# Cohort → Discord role ID map
-ROLE_MAP = {
-    "lbtcl":     os.getenv("ROLE_LBTCL_ID"),
-    "bpd":       os.getenv("ROLE_BPD_ID"),
-    "mastering": os.getenv("ROLE_MASTER_ID"),
-    "programming": os.getenv("ROLE_PB_ID"),
-}
-
-# MongoDB setup
-MONGO_DB         = os.getenv("MONGO_DB")   # e.g. "Demon"
+MONGO_DB      = os.getenv("MONGO_DB")      # e.g. "Demon"
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION")  # e.g. "C1"
+
 if not MONGO_DB:
     raise RuntimeError("Environment variable MONGO_DB must be set to your database name")
 if not MONGO_COLLECTION:
     raise RuntimeError("Environment variable MONGO_COLLECTION must be set to your collection name")
 
+# MongoDB setup
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client[MONGO_DB]
-tokens_col = db[MONGO_COLLECTION]  # use your specified collection
-MONGO_DB      = os.getenv("MONGO_DB")  # e.g. "mydatabase"
-if not MONGO_DB:
-    raise RuntimeError("Environment variable MONGO_DB must be set to your database name")
+tokens_col = db[MONGO_COLLECTION]
 
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DB]
-tokens_col = db.tokens  # will auto-create
+# Cohort → Discord role ID map
+ROLE_MAP = {
+    "lbtcl":      os.getenv("ROLE_LBTCL_ID"),
+    "bpd":        os.getenv("ROLE_BPD_ID"),
+    "mastering":  os.getenv("ROLE_MASTER_ID"),
+    "programming":os.getenv("ROLE_PB_ID"),
+}
 
-# Token management with MongoDB
-def create_token(role_key: str, valid_minutes: int = 60) -> str:
+# Token management with MongoDB (one-time use, no expiry)
+def create_token(role_key: str) -> str:
     token = uuid.uuid4().hex
-    expires_at = datetime.utcnow() + timedelta(minutes=valid_minutes)
     tokens_col.insert_one({
-        "token": token,
+        "token":    token,
         "role_key": role_key,
-        "expires_at": expires_at,
-        "used": False
+        "used":     False
     })
     return token
 
-
 def validate_and_mark(token: str) -> str | None:
-    # atomically find unused, unexpired token and mark it used
-    now = datetime.utcnow()
+    # atomically find an unused token and mark it used
     result = tokens_col.find_one_and_update(
-        {"token": token, "used": False, "expires_at": {"$gt": now}},
+        {"token": token, "used": False},
         {"$set": {"used": True}},
         return_document=True
     )
-    if not result:
-        return None
-    return result["role_key"]
+    return result["role_key"] if result else None
 
 # Discord bot setup
 intents = discord.Intents.default()
@@ -91,8 +76,6 @@ async def on_ready():
 # HTTP server for invite & callback
 routes = web.RouteTableDef()
 
-# To generate the OAuth2 authorization URL for a given cohort, make a GET request to /invite/{cohort}
-# e.g. requesting GET http://localhost:8080/invite/lbtcl will redirect you to the constructed Discord OAuth URL
 @routes.get("/invite/{cohort}")
 async def invite(request):
     cohort = request.match_info["cohort"]
@@ -118,7 +101,7 @@ async def oauth_callback(request):
     role_key = validate_and_mark(state)
 
     if not code or not role_key:
-        return web.Response(text="Invalid, expired, or already-used link", status=400)
+        return web.Response(text="Invalid or already-used link", status=400)
 
     # Exchange code for access token
     token_data = {
@@ -169,8 +152,7 @@ app.add_routes(routes)
 async def main():
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
     print("OAuth server listening on http://0.0.0.0:8080")
     await bot.start(BOT_TOKEN)
