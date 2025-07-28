@@ -7,14 +7,14 @@ import uuid
 from datetime import datetime, timedelta
 import asyncio
 import logging
+import sqlite3
+from contextlib import contextmanager
 from aiohttp import web, ClientSession
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-from pymongo import MongoClient
 
 # Load environment variables
-
 load_dotenv()
 
 # Discord & OAuth credentials
@@ -24,7 +24,9 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 REDIRECT_URI  = os.getenv("REDIRECT_URI")  # e.g. http://localhost:8080/callback
 GUILD_ID      = os.getenv("GUILD_ID")
 INVITE_URL    = os.getenv("INVITE_URL")      # post-role-assign redirect
-MONGO_URI     = os.getenv("MONGO_URI")
+
+# SQLite database path
+DB_PATH = os.getenv("DB_PATH", "tokens.db")
 
 # Cohort → Discord role ID map
 ROLE_MAP = {
@@ -34,42 +36,103 @@ ROLE_MAP = {
     "pb": os.getenv("ROLE_PB_ID"),
 }
 
-# MongoDB setup
-MONGO_DB         = os.getenv("MONGO_DB")   # e.g. "Demon"
-MONGO_COLLECTION = os.getenv("MONGO_COLLECTION")  # e.g. "C1"
-if not MONGO_DB:
-    raise RuntimeError("Environment variable MONGO_DB must be set to your database name")
-if not MONGO_COLLECTION:
-    raise RuntimeError("Environment variable MONGO_COLLECTION must be set to your collection name")
+# SQLite setup and database initialization
+def init_database():
+    """Initialize the SQLite database and create the tokens table if it doesn't exist."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT UNIQUE NOT NULL,
+                role_key TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
+                used BOOLEAN DEFAULT FALSE
+            )
+        ''')
+        conn.commit()
 
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DB]
-tokens_col = db[MONGO_COLLECTION]  # use your specified collection
+@contextmanager
+def get_db_connection():
+    """Context manager for database connections."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # Enable dict-like access to rows
+    try:
+        yield conn
+    finally:
+        conn.close()
 
-# Token management with MongoDB
+# Token management with SQLite
 def create_token(role_key: str, valid_minutes: int = 60) -> str:
+    """Create a new token for the specified role."""
     token = uuid.uuid4().hex
-    # expires_at = datetime.utcnow() + timedelta(minutes=valid_minutes)
-    tokens_col.insert_one({
-        "token": token,
-        "role_key": role_key,
-        # "expires_at": expires_at,
-        "used": False
-    })
+    expires_at = datetime.utcnow() + timedelta(minutes=valid_minutes)
+    
+    with get_db_connection() as conn:
+        conn.execute('''
+            INSERT INTO tokens (token, role_key, expires_at, used)
+            VALUES (?, ?, ?, ?)
+        ''', (token, role_key, expires_at, False))
+        conn.commit()
+    
     return token
 
-
 def validate_and_mark(token: str) -> str | None:
-    # atomically find unused, unexpired token and mark it used
+    """Validate token and mark it as used atomically. Returns role_key if valid, None otherwise."""
     now = datetime.utcnow()
-    result = tokens_col.find_one_and_update(
-        {"token": token, "used": False},
-        {"$set": {"used": True}},
-        return_document=True
-    )
-    if not result:
-        return None
-    return result["role_key"]
+    
+    with get_db_connection() as conn:
+        # Start a transaction
+        conn.execute('BEGIN IMMEDIATE')
+        
+        try:
+            # Find the token
+            cursor = conn.execute('''
+                SELECT role_key, used, expires_at 
+                FROM tokens 
+                WHERE token = ?
+            ''', (token,))
+            
+            row = cursor.fetchone()
+            
+            if not row:
+                conn.rollback()
+                return None
+            
+            # Check if already used
+            if row['used']:
+                conn.rollback()
+                return None
+            
+            # Check if expired (optional - uncomment if you want expiration)
+            # if row['expires_at'] and datetime.fromisoformat(row['expires_at']) < now:
+            #     conn.rollback()
+            #     return None
+            
+            # Mark as used
+            conn.execute('''
+                UPDATE tokens 
+                SET used = TRUE 
+                WHERE token = ?
+            ''', (token,))
+            
+            conn.commit()
+            return row['role_key']
+            
+        except Exception as e:
+            conn.rollback()
+            logging.error(f"Error validating token: {e}")
+            return None
+
+def cleanup_expired_tokens():
+    """Remove expired tokens from the database."""
+    now = datetime.utcnow()
+    with get_db_connection() as conn:
+        conn.execute('''
+            DELETE FROM tokens 
+            WHERE expires_at IS NOT NULL AND expires_at < ?
+        ''', (now,))
+        conn.commit()
 
 # Discord bot setup
 intents = discord.Intents.default()
@@ -104,7 +167,7 @@ async def invite(request):
     oauth_url = "https://discord.com/oauth2/authorize?" + urllib.parse.urlencode(params)
     raise web.HTTPFound(location=oauth_url)
 
-@routes.get("/callback")
+@routes.get("/discord/callback")
 async def oauth_callback(request):
     code  = request.query.get("code")
     state = request.query.get("state")
@@ -155,16 +218,27 @@ async def oauth_callback(request):
     # Final redirect back into Discord
     raise web.HTTPFound(location=INVITE_URL)
 
+# Optional: Add a cleanup route for maintenance
+@routes.get("/cleanup")
+async def cleanup_tokens(request):
+    """Manual endpoint to cleanup expired tokens."""
+    cleanup_expired_tokens()
+    return web.Response(text="Expired tokens cleaned up successfully")
+
 # App setup
 app = web.Application()
 app.add_routes(routes)
 
 async def main():
+    # Initialize the database
+    init_database()
+    
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8129)
+    site = web.TCPSite(runner, "127.0.0.1", 8080)
     await site.start()
-    print("OAuth server listening on http://172.81.178.3:8129")
+    print("OAuth server listening on http://127.0.0.1:8080")
+    print(f"Using SQLite database: {DB_PATH}")
     await bot.start(BOT_TOKEN)
 
 if __name__ == "__main__":
