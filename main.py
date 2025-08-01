@@ -233,7 +233,7 @@ async def send_welcome_email(email, name, cohort, token):
     """Send welcome email with Discord invite link"""
     try:
         cohort_name = COHORT_NAMES.get(cohort, f"{cohort} Cohort")
-        invite_url = f"{REDIRECT_URI.replace('/discord/callback', '')}/invite/{cohort}?token={token}"
+        invite_url = f"{REDIRECT_URI.replace('/bot/callback', '')}/invite/{cohort}?token={token}"
         
         subject = f"🎉 Welcome to {cohort_name} - Join our Discord!"
         html_body = create_email_html(name, cohort_name, invite_url)
@@ -374,7 +374,7 @@ async def send_invite_email(request):
         print(f"Email sent: {email_sent}")
         
         # Generate invite URL
-        invite_url = f"{REDIRECT_URI.replace('/discord/callback', '')}/invite/{cohort}?token={token}"
+        invite_url = f"{REDIRECT_URI.replace('/bot/callback', '')}/invite/{cohort}?token={token}"
         
         if email_sent:
             logging.info(f"Successfully sent invite email to {email} for cohort {cohort}")
