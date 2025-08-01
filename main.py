@@ -126,7 +126,7 @@ def create_email_html(name, cohort_name, invite_url, server_name="Bitshala"):
                                 🎉 Welcome {name}!
                             </h1>
                             <h2 style="color:#FF9900; margin:10px 0 0 0; font-size:18px; font-weight:normal;">
-                                You've joined the {cohort_name}
+                                You've joined the {cohort_name} Study Cohort
                             </h2>
                         </td>
                     </tr>
@@ -142,7 +142,11 @@ def create_email_html(name, cohort_name, invite_url, server_name="Bitshala"):
                                 This is where the magic happens - discussions, collaboration, and learning together.
                             </p>
                             
-                            <div style="text-align:center; margin:30px 0;">
+                            <p style="text-align:center; color:#FFB84D; font-weight:bold; margin:20px 0 10px 0;">
+                                Register for the private cohort channels with the link below (one-time-use)
+                            </p>
+                            
+                            <div style="text-align:center; margin:20px 0;">
                                 <a href="{invite_url}"
                                    style="background: linear-gradient(135deg, #FF9900, #FFB84D);
                                           color:#ffffff;
@@ -158,15 +162,20 @@ def create_email_html(name, cohort_name, invite_url, server_name="Bitshala"):
                                 </a>
                             </div>
                             
+                            <p style="text-align:center; color:#cccccc; font-size:14px; margin:15px 0;">
+                                If facing any issue while registering, please connect with the Admins at 
+                                <a href="https://discord.gg/bitshala" style="color:#FF9900; text-decoration:none;">Bitshala Discord</a>
+                            </p>
+                            
                             <div style="background-color:#1a1a1a; padding:20px; border-radius:8px; margin:20px 0;">
                                 <h3 style="color:#FF9900; margin:0 0 10px 0; font-size:16px;">
                                     What's Next?
                                 </h3>
                                 <ul style="margin:0; padding-left:20px; color:#cccccc;">
-                                    <li>Click the button above to join our Discord</li>
-                                    <li>Introduce yourself in the #introductions channel</li>
-                                    <li>Check out the cohort resources and schedule</li>
-                                    <li>Start connecting with your peers!</li>
+                                    <li>Click the button above to join private cohort channels</li>
+                                    <li>Introduce yourself in the <a href="https://discord.com/channels/773195413825683466/773195414295511100" style="color:#FF9900; text-decoration:none;">#introductions</a> channel</li>
+                                    <li>Check out the #general and #notice-board channels under PB Category (Ask Admins if you can't see the channels even after registering)</li>
+                                    <li>Stay tuned in the channels for further updates and connect with peers</li>
                                 </ul>
                             </div>
                             
