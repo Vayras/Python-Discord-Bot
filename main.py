@@ -10,6 +10,7 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from aiohttp import web, ClientSession
+from aiohttp_cors import setup as cors_setup, ResourceOptions
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -65,32 +66,22 @@ COHORT_NAMES = {
 def init_database():
     """Initialize the SQLite database and create/update the tokens table."""
     with sqlite3.connect(DB_PATH) as conn:
-        # Create the table with the new schema
+        # Create the table with composite primary key (id, email)
         conn.execute('''
             CREATE TABLE IF NOT EXISTS tokens (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER,
                 token TEXT UNIQUE NOT NULL,
                 role_key TEXT NOT NULL,
-                email TEXT,
+                email TEXT NOT NULL,
                 name TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP,
                 used BOOLEAN DEFAULT FALSE,
-                email_sent BOOLEAN DEFAULT FALSE
+                email_sent BOOLEAN DEFAULT FALSE,
+                PRIMARY KEY (id, email)
             )
         ''')
         
-        # Check if email column exists, if not add it (for existing databases)
-        cursor = conn.execute("PRAGMA table_info(tokens)")
-        columns = [column[1] for column in cursor.fetchall()]
-        
-        if 'email' not in columns:
-            conn.execute('ALTER TABLE tokens ADD COLUMN email TEXT')
-        if 'name' not in columns:
-            conn.execute('ALTER TABLE tokens ADD COLUMN name TEXT')
-        if 'email_sent' not in columns:
-            conn.execute('ALTER TABLE tokens ADD COLUMN email_sent BOOLEAN DEFAULT FALSE')
-            
         conn.commit()
 
 @contextmanager
@@ -261,11 +252,22 @@ def create_token(role_key: str, email: str = None, name: str = None, valid_minut
     token = uuid.uuid4().hex
     expires_at = datetime.utcnow() + timedelta(minutes=valid_minutes)
     
+    if not email:
+        raise ValueError("Email is required for token creation")
+    
     with get_db_connection() as conn:
+        # Get the next available ID for this email
+        cursor = conn.execute('''
+            SELECT COALESCE(MAX(id), 0) + 1 as next_id 
+            FROM tokens 
+            WHERE email = ?
+        ''', (email,))
+        next_id = cursor.fetchone()[0]
+        
         conn.execute('''
-            INSERT INTO tokens (token, role_key, email, name, expires_at, used, email_sent)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (token, role_key, email, name, expires_at, False, False))
+            INSERT INTO tokens (id, token, role_key, email, name, expires_at, used, email_sent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (next_id, token, role_key, email, name, expires_at, False, False))
         conn.commit()
     
     return token
@@ -339,6 +341,12 @@ async def on_ready():
 
 # HTTP server for invite & callback
 routes = web.RouteTableDef()
+
+# Route to handle registration (alias for /bot/invite for frontend compatibility)
+@routes.post("/register")
+async def register_user(request):
+    """Handle registration requests from frontend - alias for /bot/invite"""
+    return await send_invite_email(request)
 
 # New route to handle registration and email sending from Rust
 @routes.post("/bot/invite")
@@ -528,6 +536,20 @@ async def view_tokens(request):
 # App setup
 app = web.Application()
 app.add_routes(routes)
+
+# Setup CORS
+cors = cors_setup(app, defaults={
+    "*": ResourceOptions(
+        allow_credentials=True,
+        expose_headers="*",
+        allow_headers="*",
+        allow_methods="*"
+    )
+})
+
+# Add CORS to all routes
+for route in list(app.router.routes()):
+    cors.add(route)
 
 async def main():
     # Initialize the database
