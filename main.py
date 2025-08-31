@@ -74,11 +74,23 @@ def init_database():
                 role_key TEXT NOT NULL,
                 email TEXT NOT NULL,
                 name TEXT,
+                location TEXT,
+                describe_yourself TEXT,
+                year TEXT,
+                background TEXT,
+                github TEXT,
+                time TEXT,
+                why TEXT,
+                skills TEXT,
+                books TEXT,
+                enrolled BOOLEAN DEFAULT FALSE,
+                cohort_name TEXT,
+                hear_from TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP,
                 used BOOLEAN DEFAULT FALSE,
                 email_sent BOOLEAN DEFAULT FALSE,
-                PRIMARY KEY (id, email)
+                PRIMARY KEY (email)
             )
         ''')
         
@@ -224,7 +236,7 @@ async def send_welcome_email(email, name, cohort, token):
     """Send welcome email with Discord invite link"""
     try:
         cohort_name = COHORT_NAMES.get(cohort, f"{cohort} Cohort")
-        invite_url = f"{REDIRECT_URI.replace('/bot/callback', '')}/invite/{cohort}?token={token}"
+        invite_url = f"{REDIRECT_URI.replace('/discord/callback', '')}/invite/{cohort}?token={token}"
         
         subject = f"🎉 Welcome to {cohort_name} - Join our Discord!"
         html_body = create_email_html(name, cohort_name, invite_url)
@@ -247,13 +259,21 @@ async def send_welcome_email(email, name, cohort, token):
         return False
 
 # Token management with SQLite (updated to include email)
-def create_token(role_key: str, email: str = None, name: str = None, valid_minutes: int = 60) -> str:
-    """Create a new token for the specified role with email and name."""
+def create_token(role_key: str, email: str = None, name: str = None, location: str = None, 
+                 describe_yourself: str = None, year: str = None, background: str = None, 
+                 github: str = None, time: str = None, why: str = None, skills: list = None, 
+                 books: list = None, enrolled: bool = False, cohort_name: str = None, 
+                 hear_from: str = None, valid_minutes: int = 60) -> str:
+    """Create a new token for the specified role with all user data."""
     token = uuid.uuid4().hex
     expires_at = datetime.utcnow() + timedelta(minutes=valid_minutes)
     
     if not email:
         raise ValueError("Email is required for token creation")
+    
+    # Convert lists to JSON strings for storage
+    skills_json = json.dumps(skills) if skills else None
+    books_json = json.dumps(books) if books else None
     
     with get_db_connection() as conn:
         # Get the next available ID for this email
@@ -265,9 +285,13 @@ def create_token(role_key: str, email: str = None, name: str = None, valid_minut
         next_id = cursor.fetchone()[0]
         
         conn.execute('''
-            INSERT INTO tokens (id, token, role_key, email, name, expires_at, used, email_sent)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (next_id, token, role_key, email, name, expires_at, False, False))
+            INSERT INTO tokens (id, token, role_key, email, name, location, describe_yourself, 
+                              year, background, github, time, why, skills, books, enrolled, 
+                              cohort_name, hear_from, expires_at, used, email_sent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (next_id, token, role_key, email, name, location, describe_yourself, year, 
+              background, github, time, why, skills_json, books_json, enrolled, cohort_name, 
+              hear_from, expires_at, False, False))
         conn.commit()
     
     return token
@@ -357,6 +381,18 @@ async def send_invite_email(request):
         name = data.get('name')
         email = data.get('email')
         cohort = data.get('role')
+        location = data.get('location')
+        describe_yourself = data.get('describeYourself')
+        year = data.get('year')
+        background = data.get('background')
+        github = data.get('github')
+        time = data.get('time')
+        why = data.get('why')
+        skills = data.get('skills', [])
+        books = data.get('books', [])
+        enrolled = data.get('enrolled', False)
+        cohort_name = data.get('cohortName')
+        hear_from = data.get('hearFrom')
         
         print(data)
         
@@ -374,8 +410,24 @@ async def send_invite_email(request):
                 status=400
             )
         
-        # Create token with email and name
-        token = create_token(cohort, email, name)
+        # Create token with all user data
+        token = create_token(
+            role_key=cohort, 
+            email=email, 
+            name=name,
+            location=location,
+            describe_yourself=describe_yourself,
+            year=year,
+            background=background,
+            github=github,
+            time=time,
+            why=why,
+            skills=skills,
+            books=books,
+            enrolled=enrolled,
+            cohort_name=cohort_name,
+            hear_from=hear_from
+        )
         
         # Send welcome email
         email_sent = await send_welcome_email(email, name, cohort, token)
@@ -511,18 +563,36 @@ async def view_tokens(request):
     try:
         with get_db_connection() as conn:
             cursor = conn.execute('''
-                SELECT id, role_key, email, name, created_at, expires_at, used, email_sent
+                SELECT id, role_key, email, name, location, describe_yourself, year, background, 
+                       github, time, why, skills, books, enrolled, cohort_name, hear_from,
+                       created_at, expires_at, used, email_sent
                 FROM tokens 
                 ORDER BY created_at DESC 
                 LIMIT 50
             ''')
             tokens = []
             for row in cursor.fetchall():
+                # Parse JSON fields back to lists
+                skills = json.loads(row["skills"]) if row["skills"] else []
+                books = json.loads(row["books"]) if row["books"] else []
+                
                 tokens.append({
                     "id": row["id"],
                     "role_key": row["role_key"],
                     "email": row["email"],
                     "name": row["name"],
+                    "location": row["location"],
+                    "describe_yourself": row["describe_yourself"],
+                    "year": row["year"],
+                    "background": row["background"],
+                    "github": row["github"],
+                    "time": row["time"],
+                    "why": row["why"],
+                    "skills": skills,
+                    "books": books,
+                    "enrolled": bool(row["enrolled"]),
+                    "cohort_name": row["cohort_name"],
+                    "hear_from": row["hear_from"],
                     "created_at": row["created_at"],
                     "expires_at": row["expires_at"],
                     "used": bool(row["used"]),
