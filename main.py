@@ -10,7 +10,7 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from aiohttp import web, ClientSession
-from aiohttp_cors import setup as cors_setup, ResourceOptions
+
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -607,19 +607,9 @@ async def view_tokens(request):
 app = web.Application()
 app.add_routes(routes)
 
-# Setup CORS
-cors = cors_setup(app, defaults={
-    "*": ResourceOptions(
-        allow_credentials=True,
-        expose_headers="*",
-        allow_headers="*",
-        allow_methods="*"
-    )
-})
 
-# Add CORS to all routes
-for route in list(app.router.routes()):
-    cors.add(route)
+
+
 
 async def main():
     # Initialize the database
